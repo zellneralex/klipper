@@ -44,11 +44,13 @@ usb_bulk_in_task(void)
 {
     if (!sched_check_wake(&usb_bulk_in_wake))
         return;
-    uint_fast8_t tpos = transmit_pos;
+    uint_fast8_t tpos = transmit_pos, max_tpos = tpos;
     if (!tpos)
         return;
-    uint_fast8_t max_tpos = (tpos > USB_CDC_EP_BULK_IN_SIZE
-                             ? USB_CDC_EP_BULK_IN_SIZE : tpos);
+    if (max_tpos > USB_CDC_EP_BULK_IN_SIZE)
+        max_tpos = USB_CDC_EP_BULK_IN_SIZE;
+    else if (max_tpos == USB_CDC_EP_BULK_IN_SIZE)
+        max_tpos = USB_CDC_EP_BULK_IN_SIZE-1; // Avoid zero-length-packets
     int_fast8_t ret = usb_send_bulk_in(transmit_buf, max_tpos);
     if (ret <= 0)
         return;
@@ -446,6 +448,8 @@ static uint8_t line_control_state;
 static void
 check_reboot(void)
 {
+    if (!CONFIG_HAVE_BOOTLOADER_REQUEST)
+        return;
     if (line_coding.dwDTERate == 1200 && !(line_control_state & 0x01))
         // A baud of 1200 is an Arduino style request to enter the bootloader
         bootloader_request();

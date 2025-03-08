@@ -2,7 +2,7 @@
 //
 // Copyright (C) 2019 Eug Krashtan <eug.krashtan@gmail.com>
 // Copyright (C) 2020 Pontus Borg <glpontus@gmail.com>
-// Copyright (C) 2021  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2021-2025  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -49,6 +49,7 @@
 
 #if CONFIG_MACH_STM32F0
  #define SOC_CAN CAN
+ #define FILTER_CAN CAN
  #define CAN_RX0_IRQn  CEC_CAN_IRQn
  #define CAN_RX1_IRQn  CEC_CAN_IRQn
  #define CAN_TX_IRQn   CEC_CAN_IRQn
@@ -58,6 +59,7 @@
 
 #if CONFIG_MACH_STM32F1
  #define SOC_CAN CAN1
+ #define FILTER_CAN CAN1
  #define CAN_RX0_IRQn  CAN1_RX0_IRQn
  #define CAN_RX1_IRQn  CAN1_RX1_IRQn
  #define CAN_TX_IRQn   CAN1_TX_IRQn
@@ -69,12 +71,14 @@
  #if (CONFIG_STM32_CANBUS_PA11_PA12 || CONFIG_STM32_CANBUS_PB8_PB9 \
      || CONFIG_STM32_CANBUS_PD0_PD1 || CONFIG_STM32_CANBUS_PI9_PH13)
   #define SOC_CAN CAN1
+  #define FILTER_CAN CAN1
   #define CAN_RX0_IRQn  CAN1_RX0_IRQn
   #define CAN_RX1_IRQn  CAN1_RX1_IRQn
   #define CAN_TX_IRQn   CAN1_TX_IRQn
   #define CAN_SCE_IRQn  CAN1_SCE_IRQn
  #elif CONFIG_STM32_CANBUS_PB5_PB6 || CONFIG_STM32_CANBUS_PB12_PB13
   #define SOC_CAN CAN2
+  #define FILTER_CAN CAN1
   #define CAN_RX0_IRQn  CAN2_RX0_IRQn
   #define CAN_RX1_IRQn  CAN2_RX1_IRQn
   #define CAN_TX_IRQn   CAN2_TX_IRQn
@@ -92,7 +96,7 @@
 
 // Transmit a packet
 int
-canbus_send(struct canbus_msg *msg)
+canhw_send(struct canbus_msg *msg)
 {
     uint32_t tsr = SOC_CAN->TSR;
     if (!(tsr & (CAN_TSR_TME0|CAN_TSR_TME1|CAN_TSR_TME2))) {
@@ -129,34 +133,64 @@ canbus_send(struct canbus_msg *msg)
 
 // Setup the receive packet filter
 void
-canbus_set_filter(uint32_t id)
+canhw_set_filter(uint32_t id)
 {
+    CAN_TypeDef *fcan = FILTER_CAN;
     /* Select the start slave bank */
-    SOC_CAN->FMR |= CAN_FMR_FINIT;
+    uint32_t fmr = fcan->FMR;
+    if (FILTER_CAN != SOC_CAN)
+        // Using CAN2 with filter on CAN1 - assign CAN2 to first filter
+        fmr &= ~CAN_FMR_CAN2SB;
+    fcan->FMR = fmr | CAN_FMR_FINIT;
     /* Initialisation mode for the filter */
-    SOC_CAN->FA1R = 0;
+    fcan->FA1R = 0;
 
     if (CONFIG_CANBUS_FILTER) {
         uint32_t mask = CAN_TI0R_STID | CAN_TI0R_IDE | CAN_TI0R_RTR;
-        SOC_CAN->sFilterRegister[0].FR1 = CANBUS_ID_ADMIN << CAN_RI0R_STID_Pos;
-        SOC_CAN->sFilterRegister[0].FR2 = mask;
-        SOC_CAN->sFilterRegister[1].FR1 = (id + 1) << CAN_RI0R_STID_Pos;
-        SOC_CAN->sFilterRegister[1].FR2 = mask;
-        SOC_CAN->sFilterRegister[2].FR1 = id << CAN_RI0R_STID_Pos;
-        SOC_CAN->sFilterRegister[2].FR2 = mask;
+        fcan->sFilterRegister[0].FR1 = CANBUS_ID_ADMIN << CAN_RI0R_STID_Pos;
+        fcan->sFilterRegister[0].FR2 = mask;
+        fcan->sFilterRegister[1].FR1 = (id + 1) << CAN_RI0R_STID_Pos;
+        fcan->sFilterRegister[1].FR2 = mask;
+        fcan->sFilterRegister[2].FR1 = id << CAN_RI0R_STID_Pos;
+        fcan->sFilterRegister[2].FR2 = mask;
     } else {
-        SOC_CAN->sFilterRegister[0].FR1 = 0;
-        SOC_CAN->sFilterRegister[0].FR2 = 0;
+        fcan->sFilterRegister[0].FR1 = 0;
+        fcan->sFilterRegister[0].FR2 = 0;
         id = 0;
     }
 
     /* 32-bit scale for the filter */
-    SOC_CAN->FS1R = (1<<0) | (1<<1) | (1<<2);
+    fcan->FS1R = (1<<0) | (1<<1) | (1<<2);
 
     /* Filter activation */
-    SOC_CAN->FA1R = (1<<0) | (id ? (1<<1) | (1<<2) : 0);
+    fcan->FA1R = (1<<0) | (id ? (1<<1) | (1<<2) : 0);
     /* Leave the initialisation mode for the filter */
-    SOC_CAN->FMR &= ~CAN_FMR_FINIT;
+    fcan->FMR = fmr & ~CAN_FMR_FINIT;
+}
+
+static struct {
+    uint32_t rx_error, tx_error;
+} CAN_Errors;
+
+// Report interface status
+void
+canhw_get_status(struct canbus_status *status)
+{
+    irqstatus_t flag = irq_save();
+    uint32_t esr = SOC_CAN->ESR;
+    uint32_t rx_error = CAN_Errors.rx_error, tx_error = CAN_Errors.tx_error;
+    irq_restore(flag);
+
+    status->rx_error = rx_error;
+    status->tx_error = tx_error;
+    if (esr & CAN_ESR_BOFF)
+        status->bus_state = CANBUS_STATE_OFF;
+    else if (esr & CAN_ESR_EPVF)
+        status->bus_state = CANBUS_STATE_PASSIVE;
+    else if (esr & CAN_ESR_EWGF)
+        status->bus_state = CANBUS_STATE_WARN;
+    else
+        status->bus_state = 0;
 }
 
 // This function handles CAN global interrupts
@@ -181,12 +215,29 @@ CAN_IRQHandler(void)
         // Process packet
         canbus_process_data(&msg);
     }
+
+    // Check for transmit ready
     uint32_t ier = SOC_CAN->IER;
     if (ier & CAN_IER_TMEIE
         && SOC_CAN->TSR & (CAN_TSR_RQCP0|CAN_TSR_RQCP1|CAN_TSR_RQCP2)) {
         // Tx
         SOC_CAN->IER = ier & ~CAN_IER_TMEIE;
         canbus_notify_tx();
+    }
+
+    // Check for error irq
+    uint32_t msr = SOC_CAN->MSR;
+    if (msr & CAN_MSR_ERRI) {
+        uint32_t esr = SOC_CAN->ESR;
+        uint32_t lec = (esr & CAN_ESR_LEC_Msk) >> CAN_ESR_LEC_Pos;
+        if (lec && lec != 7) {
+            SOC_CAN->ESR = 7 << CAN_ESR_LEC_Pos;
+            if (lec >= 3 && lec <= 5)
+                CAN_Errors.tx_error += 1;
+            else
+                CAN_Errors.rx_error += 1;
+        }
+        SOC_CAN->MSR = CAN_MSR_ERRI;
     }
 }
 
@@ -241,7 +292,11 @@ compute_btr(uint32_t pclock, uint32_t bitrate)
 void
 can_init(void)
 {
+    // Enable clock
     enable_pclock((uint32_t)SOC_CAN);
+    if (FILTER_CAN != SOC_CAN)
+        // Also enable CAN1 clock if using CAN2 with filter on CAN1
+        enable_pclock((uint32_t)FILTER_CAN);
 
     gpio_peripheral(GPIO_Rx, CAN_FUNCTION, 1);
     gpio_peripheral(GPIO_Tx, CAN_FUNCTION, 0);
@@ -268,7 +323,7 @@ can_init(void)
         ;
 
     /*##-2- Configure the CAN Filter #######################################*/
-    canbus_set_filter(0);
+    canhw_set_filter(0);
 
     /*##-3- Configure Interrupts #################################*/
     armcm_enable_irq(CAN_IRQHandler, CAN_RX0_IRQn, 0);
@@ -276,6 +331,8 @@ can_init(void)
         armcm_enable_irq(CAN_IRQHandler, CAN_RX1_IRQn, 0);
     if (CAN_RX0_IRQn != CAN_TX_IRQn)
         armcm_enable_irq(CAN_IRQHandler, CAN_TX_IRQn, 0);
-    SOC_CAN->IER = CAN_IER_FMPIE0;
+    if (CAN_RX0_IRQn != CAN_SCE_IRQn)
+        armcm_enable_irq(CAN_IRQHandler, CAN_SCE_IRQn, 0);
+    SOC_CAN->IER = CAN_IER_FMPIE0 | CAN_IER_ERRIE;
 }
 DECL_INIT(can_init);

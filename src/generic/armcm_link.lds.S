@@ -4,14 +4,14 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include "autoconf.h" // CONFIG_FLASH_START
+#include "autoconf.h" // CONFIG_FLASH_APPLICATION_ADDRESS
 
 OUTPUT_FORMAT("elf32-littlearm", "elf32-littlearm", "elf32-littlearm")
 OUTPUT_ARCH(arm)
 
 MEMORY
 {
-  rom (rx) : ORIGIN = CONFIG_FLASH_START , LENGTH = CONFIG_FLASH_SIZE
+  rom (rx) : ORIGIN = CONFIG_FLASH_APPLICATION_ADDRESS , LENGTH = CONFIG_FLASH_SIZE
   ram (rwx) : ORIGIN = CONFIG_RAM_START , LENGTH = CONFIG_RAM_SIZE
 }
 
@@ -69,5 +69,8 @@ SECTIONS
         // that isn't needed so no need to include them in the binary.
         *(.init)
         *(.fini)
+        // Don't include exception tables
+        *(.ARM.extab)
+        *(.ARM.exidx)
     }
 }
